@@ -1,0 +1,129 @@
+import { normalizeBaseUrl, normalizeTo } from "./origin.js";
+
+const $ = (id) => document.getElementById(id);
+
+let tabId = null;
+let expiresAt = null;
+let currentStatus = null;
+
+function send(msg) {
+  return chrome.runtime.sendMessage(msg);
+}
+
+function remaining() {
+  if (!expiresAt) return "";
+  const sec = Math.max(0, Math.ceil((expiresAt - Date.now()) / 1000));
+  return `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, "0")}`;
+}
+
+function statusCopy(status, extra = {}) {
+  if (status === "waiting") return `Waiting for approval… ${remaining()}`;
+  if (status === "filling") return "Signing you in…";
+  if (status === "filled") return "Signed in";
+  if (status === "no_form") return "Could not find a login form";
+  if (status === "expired") return "Request timed out";
+  if (status === "page_changed") return "The page changed, so sign-in was cancelled.";
+  if (extra.code === "pairing") {
+    return "Save this public key on the dashboard and confirm the origin and account.";
+  }
+  if (extra.code === "bad_tab") {
+    return "Open an http(s) page. chrome:// and similar tabs cannot be used.";
+  }
+  return extra.message || "Something went wrong.";
+}
+
+function paintStatus(status, extra = {}) {
+  currentStatus = status;
+  if (extra.expiresAt) expiresAt = extra.expiresAt;
+  const el = $("status");
+  el.textContent = status ? statusCopy(status, extra) : "";
+  el.classList.toggle("ok", status === "filled");
+  el.classList.toggle("err", Boolean(status) && !["waiting", "filling", "filled"].includes(status));
+  const busy = status === "waiting" || status === "filling";
+  $("send").disabled = busy || $("send").dataset.blocked === "1";
+}
+
+function render(state) {
+  $("fingerprint").textContent = state.fingerprint ? `Fingerprint ${state.fingerprint}` : "Pairing…";
+  $("public-key").value = state.publicKey ?? "";
+  $("base-url").value = state.baseUrl ?? "";
+  tabId = state.tabId ?? tabId;
+
+  if (state.origin) {
+    $("origin").textContent = state.origin;
+    $("send").dataset.blocked = "";
+  } else {
+    $("origin").textContent = "This tab is not an http(s) page.";
+    $("send").dataset.blocked = "1";
+  }
+
+  if (state.live) paintStatus(state.live.status, { expiresAt: state.live.expiresAt });
+  else if (!state.origin) paintStatus("error", { code: "bad_tab" });
+  else $("send").disabled = $("send").dataset.blocked === "1";
+}
+
+$("request-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const to = normalizeTo($("to").value);
+  if (!to) {
+    paintStatus("error", { message: "Enter an email or handle." });
+    return;
+  }
+  paintStatus("waiting", { expiresAt: Date.now() + 5 * 60 * 1000 });
+  try {
+    const result = await send({ type: "request", to, tabId });
+    paintStatus(result.status, result);
+  } catch {
+    if (currentStatus !== "waiting") {
+      paintStatus("error", { message: "Could not reach the extension." });
+    }
+  }
+});
+
+$("copy-key").addEventListener("click", async () => {
+  const value = $("public-key").value;
+  if (!value) return;
+  await navigator.clipboard.writeText(value);
+  $("copy-key").textContent = "Copied";
+  setTimeout(() => {
+    $("copy-key").textContent = "Copy public key";
+  }, 1500);
+});
+
+$("base-url").addEventListener("change", async () => {
+  $("base-error").hidden = true;
+  let baseUrl;
+  try {
+    baseUrl = normalizeBaseUrl($("base-url").value);
+  } catch {
+    $("base-error").hidden = false;
+    $("base-error").textContent = "Use an http or https Authnudge URL.";
+    return;
+  }
+  const saved = await send({ type: "setBaseUrl", baseUrl });
+  if (saved.baseUrl) $("base-url").value = saved.baseUrl;
+});
+
+$("regenerate").addEventListener("click", async () => {
+  if (!confirm("This breaks pairing until you save the new public key. Continue?")) return;
+  const next = await send({ type: "regenerateKey" });
+  $("public-key").value = next.publicKey ?? "";
+  $("fingerprint").textContent = next.fingerprint ? `Fingerprint ${next.fingerprint}` : "Pairing…";
+  paintStatus(null);
+});
+
+chrome.runtime.onMessage.addListener((msg) => {
+  if (msg?.type === "status") paintStatus(msg.status, msg);
+});
+
+setInterval(() => {
+  if (currentStatus === "waiting") paintStatus("waiting", { expiresAt });
+}, 1000);
+
+const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+tabId = tab?.id ?? null;
+try {
+  render(await send({ type: "getState", tabId }));
+} catch {
+  paintStatus("error", { message: "Could not start the extension. Open the popup again." });
+}

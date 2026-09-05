@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Authnudge</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header class="brand">
+      <img src="icons/icon32.png" alt="" width="28" height="28" />
+      <div>
+        <h1>Authnudge</h1>
+        <p id="fingerprint" class="muted">Pairing…</p>
+      </div>
+    </header>
+
+    <form id="request-form">
+      <label for="to">To</label>
+      <input
+        id="to"
+        name="to"
+        type="text"
+        autocomplete="off"
+        spellcheck="false"
+        placeholder="email or handle"
+        maxlength="254"
+      />
+
+      <p class="label">This tab</p>
+      <p id="origin" class="origin">Checking…</p>
+
+      <button id="send" type="submit">Request sign-in</button>
+    </form>
+
+    <p id="status" class="status" role="status" aria-live="polite"></p>
+
+    <details id="pairing" open>
+      <summary>Pairing</summary>
+      <ol>
+        <li>Copy the public key.</li>
+        <li>Open the Authnudge dashboard → Access → Public keys.</li>
+        <li>Name it (for example “Browser extension”) and paste.</li>
+      </ol>
+      <label for="public-key">Public key</label>
+      <textarea id="public-key" readonly rows="4" spellcheck="false"></textarea>
+      <button id="copy-key" type="button">Copy public key</button>
+      <label for="base-url">Authnudge URL</label>
+      <input id="base-url" type="url" spellcheck="false" />
+      <p id="base-error" class="muted" hidden></p>
+      <p class="warn">
+        Anyone with this browser profile can export the keypair. Pairing authenticates this install’s
+        key, not an official binary.
+      </p>
+      <button id="regenerate" type="button" class="ghost">Regenerate key</button>
+    </details>
+
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>
