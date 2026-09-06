@@ -39,3 +39,18 @@ export function normalizeBaseUrl(value) {
   if (!url.hostname) throw new Error("Authnudge URL is missing a host");
   return `${url.protocol}//${url.host}`;
 }
+
+export const DEFAULT_BASE = "https://authnudge.com";
+export const LOCAL_BASE = "http://127.0.0.1:5173";
+
+export function resolveBaseUrl(raw) {
+  if (raw == null || raw === "") return DEFAULT_BASE;
+  try {
+    const url = normalizeBaseUrl(raw);
+    const host = new URL(url).hostname;
+    if (host === "127.0.0.1" || host === "localhost" || host === "[::1]") return url;
+  } catch {
+    /* fall through */
+  }
+  return DEFAULT_BASE;
+}

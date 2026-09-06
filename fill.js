@@ -2,6 +2,10 @@
 // Return status only — never field values.
 // ponytail: no shadow-DOM / cross-host iframe recipes; add a site list if real logins stay unfilled.
 export async function fillLoginForm(identifier, secret, expectedOrigin, waitMs = 15000) {
+  // Playwright page.evaluate only passes one argument.
+  if (identifier !== null && typeof identifier === "object" && !Array.isArray(identifier)) {
+    ({ identifier, secret, expectedOrigin, waitMs = 15000 } = identifier);
+  }
   const hostOf = (tabUrl) => {
     let url;
     try {

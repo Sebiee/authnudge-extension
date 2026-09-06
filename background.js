@@ -1,9 +1,23 @@
 import { decryptEnvelope, generateRequesterKeys, requesterFingerprint, signRequest } from "./e2e.js";
 import { fillLoginForm } from "./fill.js";
-import { normalizeBaseUrl, normalizeOrigin, normalizeTo, sameLoginHost } from "./origin.js";
+import { resolveBaseUrl, normalizeOrigin, normalizeTo, sameLoginHost } from "./origin.js";
 
-const DEFAULT_BASE = "https://authnudge.com";
 const ALARM = "authnudge-watch";
+
+let devBaseRaw;
+
+async function apiBase() {
+  if (devBaseRaw === undefined) {
+    try {
+      const res = await fetch(chrome.runtime.getURL("dev.json"));
+      const data = res.ok ? await res.json() : null;
+      devBaseRaw = typeof data?.baseUrl === "string" ? data.baseUrl : "";
+    } catch {
+      devBaseRaw = "";
+    }
+  }
+  return resolveBaseUrl(devBaseRaw);
+}
 
 let live = null;
 let claim = null;
@@ -18,18 +32,17 @@ function pushStatus(status, extra = {}) {
 }
 
 async function readStore() {
-  return chrome.storage.local.get(["publicKey", "privateKey", "baseUrl"]);
+  return chrome.storage.local.get(["publicKey", "privateKey", "rememberTo", "savedTo"]);
 }
 
 async function ensureKeys() {
   const store = await readStore();
   if (store.publicKey && store.privateKey) {
-    return { publicKey: store.publicKey, privateKey: store.privateKey, baseUrl: store.baseUrl || DEFAULT_BASE };
+    return { publicKey: store.publicKey, privateKey: store.privateKey };
   }
   const keys = await generateRequesterKeys();
-  const baseUrl = store.baseUrl || DEFAULT_BASE;
-  await chrome.storage.local.set({ publicKey: keys.publicKey, privateKey: keys.privateKey, baseUrl });
-  return { ...keys, baseUrl };
+  await chrome.storage.local.set({ publicKey: keys.publicKey, privateKey: keys.privateKey });
+  return keys;
 }
 
 async function getTab(tabId) {
@@ -68,28 +81,19 @@ async function getState(tabId) {
     }
   }
   const keys = await ensureKeys();
+  const store = await readStore();
   const tab = await getTab(tabId);
   const origin = tab?.url ? normalizeOrigin(tab.url) : null;
   return {
     publicKey: keys.publicKey,
     fingerprint: await requesterFingerprint(keys.publicKey),
-    baseUrl: keys.baseUrl,
+    rememberTo: Boolean(store.rememberTo),
+    savedTo: typeof store.savedTo === "string" ? store.savedTo : "",
+    baseUrl: await apiBase(),
     tabId: tab?.id ?? null,
     origin,
     live: live ? { status: live.status, expiresAt: live.expiresAt } : null,
   };
-}
-
-async function setBaseUrl(raw) {
-  const baseUrl = normalizeBaseUrl(raw);
-  const origin = `${baseUrl}/*`;
-  const have = await chrome.permissions.contains({ origins: [origin] });
-  if (!have) {
-    const granted = await chrome.permissions.request({ origins: [origin] });
-    if (!granted) return { ok: false, error: "Permission for that Authnudge URL was denied." };
-  }
-  await chrome.storage.local.set({ baseUrl });
-  return { ok: true, baseUrl };
 }
 
 async function regenerateKey() {
@@ -100,11 +104,9 @@ async function regenerateKey() {
   await chrome.alarms.clear(ALARM);
   await dropClaim();
   const keys = await generateRequesterKeys();
-  const store = await readStore();
   await chrome.storage.local.set({
     publicKey: keys.publicKey,
     privateKey: keys.privateKey,
-    baseUrl: store.baseUrl || DEFAULT_BASE,
   });
   return {
     publicKey: keys.publicKey,
@@ -339,10 +341,11 @@ async function startRequest({ to, tabId }) {
 
     const keys = await ensureKeys();
     const signature = await signRequest(keys.privateKey, { to: address, origin, publicKey: keys.publicKey });
+    const baseUrl = await apiBase();
 
     let created;
     try {
-      const res = await fetch(`${keys.baseUrl}/api/v1/requests`, {
+      const res = await fetch(`${baseUrl}/api/v1/requests`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
@@ -365,7 +368,7 @@ async function startRequest({ to, tabId }) {
       gen: ++requestGen,
       requestId: created.requestId,
       claimToken: created.claimToken,
-      baseUrl: keys.baseUrl,
+      baseUrl,
       tabId,
       origin,
       expiresAt,
@@ -382,7 +385,6 @@ async function startRequest({ to, tabId }) {
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   const run = async () => {
     if (msg?.type === "getState") return getState(msg.tabId);
-    if (msg?.type === "setBaseUrl") return setBaseUrl(msg.baseUrl);
     if (msg?.type === "regenerateKey") return regenerateKey();
     if (msg?.type === "request") return startRequest({ to: msg.to, tabId: msg.tabId });
     return { status: "error", code: "generic" };

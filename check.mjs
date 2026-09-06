@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { decryptEnvelope, encryptForRequester, generateRequesterKeys, requesterFingerprint, signRequest } from "./e2e.js";
 import { fillLoginForm } from "./fill.js";
-import { normalizeBaseUrl, normalizeOrigin, normalizeTo, sameLoginHost } from "./origin.js";
+import { DEFAULT_BASE, LOCAL_BASE, normalizeBaseUrl, normalizeOrigin, normalizeTo, resolveBaseUrl, sameLoginHost } from "./origin.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -20,11 +20,17 @@ assert.equal(normalizeTo("@Alice"), "alice");
 assert.equal(normalizeTo("  You@Example.com "), "you@example.com");
 assert.equal(normalizeBaseUrl("http://127.0.0.1:5173/path"), "http://127.0.0.1:5173");
 assert.equal(normalizeBaseUrl("https://authnudge.com/"), "https://authnudge.com");
+assert.equal(resolveBaseUrl(""), DEFAULT_BASE);
+assert.equal(resolveBaseUrl("http://127.0.0.1:5173"), LOCAL_BASE);
+assert.equal(resolveBaseUrl("http://localhost:5173/path"), "http://localhost:5173");
+assert.equal(resolveBaseUrl("https://evil.example"), DEFAULT_BASE);
+assert.equal(resolveBaseUrl("not a url"), DEFAULT_BASE);
 assert.match(readFileSync(join(here, "LICENSE"), "utf8"), /MIT License/);
-assert.match(readFileSync(join(here, "background.js"), "utf8"), /DEFAULT_BASE = "https:\/\/authnudge\.com"/);
+assert.match(readFileSync(join(here, "background.js"), "utf8"), /resolveBaseUrl/);
 const manifest = readFileSync(join(here, "manifest.json"), "utf8");
 assert.match(JSON.parse(manifest).version, /^\d+\.\d+\.\d+$/);
 assert.match(manifest, /https:\/\/authnudge\.com\/\*/);
+assert.match(manifest, /http:\/\/127\.0\.0\.1:5173\/\*/);
 assert.doesNotMatch(manifest, /"host_permissions": \["http:\/\/\*\/\*", "https:\/\/\*\/\*"\]/);
 
 const keys = await generateRequesterKeys();
@@ -65,16 +71,23 @@ await assert.rejects(() =>
 const background = readFileSync(join(here, "background.js"), "utf8");
 assert.match(background, /payload\?\.origin !== origin/);
 assert.match(background, /requestId, requesterPublicKey/);
+assert.doesNotMatch(background, /setBaseUrl|keys\.baseUrl|update_url|useLocal/);
+assert.match(background, /dev\.json/);
 
 const src = fillLoginForm.toString();
 assert.match(src, /return \{ ok: true \}/);
 assert.match(src, /need_password/);
 assert.match(src, /MutationObserver/);
 assert.match(src, /wipePassword/);
+assert.match(src, /typeof identifier === "object"/);
 assert.doesNotMatch(src, /return \{[^}]*identifier|return \{[^}]*secret/);
 
 const ui = ["popup.html", "popup.js", "popup.css"].map((name) => readFileSync(join(here, name), "utf8")).join("\n");
 assert.doesNotMatch(ui, /envelope|decryptEnvelope|claimToken|privateKey/);
 assert.doesNotMatch(ui, /payload\.(username|password)/);
+assert.doesNotMatch(ui, /id="base-url"|id="pairing"|Authnudge URL/);
+assert.match(ui, /id="remember"/);
+assert.match(ui, /id="copy-key"/);
+assert.doesNotMatch(ui, /id="use-local"/);
 
 console.log("extension check ok", fingerprint);

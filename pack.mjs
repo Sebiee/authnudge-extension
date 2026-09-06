@@ -53,6 +53,7 @@ if (isMain && process.argv.includes("--check")) {
   assert.ok(PACK_FILES.includes("LICENSE"));
   assert.ok(!PACK_FILES.includes("check.mjs"));
   assert.ok(!PACK_FILES.includes("pack.mjs"));
+  assert.ok(!PACK_FILES.includes("dev.json"));
   assert.match(packageVersion(), /^\d+\.\d+\.\d+$/);
   console.log("extension pack check ok");
 } else if (isMain) {

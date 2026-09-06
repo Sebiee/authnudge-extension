@@ -26,6 +26,10 @@
         placeholder="email or handle"
         maxlength="254"
       />
+      <label class="remember" for="remember">
+        <input id="remember" name="remember" type="checkbox" />
+        Remember this handle
+      </label>
 
       <p class="label">This tab</p>
       <p id="origin" class="origin">Checking…</p>
@@ -33,27 +37,18 @@
       <button id="send" type="submit">Request sign-in</button>
     </form>
 
+    <div class="pubkey-block">
+      <div class="pubkey-head">
+        <p class="label">Public key</p>
+        <button id="copy-key" type="button" class="small" aria-label="Copy public key">Copy</button>
+      </div>
+      <p id="public-key" class="pubkey" title=""></p>
+    </div>
+
     <p id="status" class="status" role="status" aria-live="polite"></p>
 
-    <details id="pairing" open>
-      <summary>Pairing</summary>
-      <ol>
-        <li>Copy the public key.</li>
-        <li>Open the Authnudge dashboard → Access → Public keys.</li>
-        <li>Name it (for example “Browser extension”) and paste.</li>
-      </ol>
-      <label for="public-key">Public key</label>
-      <textarea id="public-key" readonly rows="4" spellcheck="false"></textarea>
-      <button id="copy-key" type="button">Copy public key</button>
-      <label for="base-url">Authnudge URL</label>
-      <input id="base-url" type="url" spellcheck="false" />
-      <p id="base-error" class="muted" hidden></p>
-      <p class="warn">
-        Anyone with this browser profile can export the keypair. Pairing authenticates this install’s
-        key, not an official binary.
-      </p>
-      <button id="regenerate" type="button" class="ghost">Regenerate key</button>
-    </details>
+    <p id="api-base" class="muted" hidden></p>
+    <button id="regenerate" type="button" class="ghost">Regenerate key</button>
 
     <script type="module" src="popup.js"></script>
   </body>

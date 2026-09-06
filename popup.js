@@ -1,4 +1,4 @@
-import { normalizeBaseUrl, normalizeTo } from "./origin.js";
+import { DEFAULT_BASE, normalizeTo } from "./origin.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -43,13 +43,29 @@ function paintStatus(status, extra = {}) {
   $("send").disabled = busy || $("send").dataset.blocked === "1";
 }
 
+function paintKey(publicKey) {
+  const value = publicKey ?? "";
+  $("public-key").textContent = value;
+  $("public-key").title = value;
+}
+
+async function persistHandle() {
+  const remember = $("remember").checked;
+  const savedTo = remember ? normalizeTo($("to").value) : "";
+  await chrome.storage.local.set({ rememberTo: remember, savedTo });
+}
+
 function render(state) {
   $("fingerprint").textContent = state.fingerprint
     ? `Encryption key ${state.fingerprint} — compare with the grant page`
     : "Pairing…";
-  $("public-key").value = state.publicKey ?? "";
-  $("base-url").value = state.baseUrl ?? "";
+  paintKey(state.publicKey);
   tabId = state.tabId ?? tabId;
+  $("remember").checked = Boolean(state.rememberTo);
+  if (state.rememberTo && state.savedTo) $("to").value = state.savedTo;
+  const local = Boolean(state.baseUrl) && state.baseUrl !== DEFAULT_BASE;
+  $("api-base").hidden = !local;
+  $("api-base").textContent = local ? `Sending to ${state.baseUrl}` : "";
 
   if (state.origin) {
     $("origin").textContent = state.origin;
@@ -71,6 +87,7 @@ $("request-form").addEventListener("submit", async (event) => {
     paintStatus("error", { message: "Enter an email or handle." });
     return;
   }
+  await persistHandle();
   paintStatus("waiting", { expiresAt: Date.now() + 5 * 60 * 1000 });
   try {
     const result = await send({ type: "request", to, tabId });
@@ -82,39 +99,28 @@ $("request-form").addEventListener("submit", async (event) => {
   }
 });
 
+$("remember").addEventListener("change", () => {
+  void persistHandle();
+});
+
+$("to").addEventListener("change", () => {
+  if ($("remember").checked) void persistHandle();
+});
+
 $("copy-key").addEventListener("click", async () => {
-  const value = $("public-key").value;
+  const value = $("public-key").textContent;
   if (!value) return;
   await navigator.clipboard.writeText(value);
   $("copy-key").textContent = "Copied";
   setTimeout(() => {
-    $("copy-key").textContent = "Copy public key";
+    $("copy-key").textContent = "Copy";
   }, 1500);
-});
-
-$("base-url").addEventListener("change", async () => {
-  $("base-error").hidden = true;
-  let baseUrl;
-  try {
-    baseUrl = normalizeBaseUrl($("base-url").value);
-  } catch {
-    $("base-error").hidden = false;
-    $("base-error").textContent = "Use an http or https Authnudge URL.";
-    return;
-  }
-  const saved = await send({ type: "setBaseUrl", baseUrl });
-  if (!saved?.ok) {
-    $("base-error").hidden = false;
-    $("base-error").textContent = saved?.error || "Could not save that Authnudge URL.";
-    return;
-  }
-  if (saved.baseUrl) $("base-url").value = saved.baseUrl;
 });
 
 $("regenerate").addEventListener("click", async () => {
   if (!confirm("This breaks pairing until you save the new public key. Continue?")) return;
   const next = await send({ type: "regenerateKey" });
-  $("public-key").value = next.publicKey ?? "";
+  paintKey(next.publicKey);
   $("fingerprint").textContent = next.fingerprint
     ? `Encryption key ${next.fingerprint} — compare with the grant page`
     : "Pairing…";
