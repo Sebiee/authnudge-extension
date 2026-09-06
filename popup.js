@@ -101,6 +101,11 @@ $("base-url").addEventListener("change", async () => {
     return;
   }
   const saved = await send({ type: "setBaseUrl", baseUrl });
+  if (!saved?.ok) {
+    $("base-error").hidden = false;
+    $("base-error").textContent = saved?.error || "Could not save that Authnudge URL.";
+    return;
+  }
   if (saved.baseUrl) $("base-url").value = saved.baseUrl;
 });
 

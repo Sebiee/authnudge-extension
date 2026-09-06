@@ -82,6 +82,12 @@ async function getState(tabId) {
 
 async function setBaseUrl(raw) {
   const baseUrl = normalizeBaseUrl(raw);
+  const origin = `${baseUrl}/*`;
+  const have = await chrome.permissions.contains({ origins: [origin] });
+  if (!have) {
+    const granted = await chrome.permissions.request({ origins: [origin] });
+    if (!granted) return { ok: false, error: "Permission for that Authnudge URL was denied." };
+  }
   await chrome.storage.local.set({ baseUrl });
   return { ok: true, baseUrl };
 }
