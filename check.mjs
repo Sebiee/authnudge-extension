@@ -17,6 +17,7 @@ assert.equal(normalizeTo("@Alice"), "alice");
 assert.equal(normalizeTo("  You@Example.com "), "you@example.com");
 assert.equal(normalizeBaseUrl("http://127.0.0.1:5173/path"), "http://127.0.0.1:5173");
 assert.equal(normalizeBaseUrl("https://authnudge.com/"), "https://authnudge.com");
+assert.match(readFileSync(join(here, "LICENSE"), "utf8"), /MIT License/);
 assert.match(readFileSync(join(here, "background.js"), "utf8"), /DEFAULT_BASE = "https:\/\/authnudge\.com"/);
 assert.equal(
   JSON.parse(readFileSync(join(here, "manifest.json"), "utf8")).version,

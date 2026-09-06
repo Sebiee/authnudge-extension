@@ -1,0 +1,41 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Check
+        run: node check.mjs && node pack.mjs --check
+
+      - name: Require tag to match manifest
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          ver="$(node -p "JSON.parse(require('fs').readFileSync('manifest.json','utf8')).version")"
+          test "$tag" = "$ver"
+
+      - name: Pack
+        run: node pack.mjs
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ver="${GITHUB_REF_NAME#v}"
+          gh release create "$GITHUB_REF_NAME" \
+            "authnudge-extension-v${ver}.zip" \
+            --title "Authnudge ${GITHUB_REF_NAME}" \
+            --notes "Unzip, open chrome://extensions, enable Developer mode, Load unpacked, and choose the unzipped folder."
