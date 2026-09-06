@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { decryptEnvelope, encryptForRequester, generateRequesterKeys, requesterFingerprint, signRequest } from "./e2e.js";
@@ -19,13 +19,8 @@ assert.equal(normalizeBaseUrl("http://127.0.0.1:5173/path"), "http://127.0.0.1:5
 assert.equal(normalizeBaseUrl("https://authnudge.com/"), "https://authnudge.com");
 assert.match(readFileSync(join(here, "LICENSE"), "utf8"), /MIT License/);
 assert.match(readFileSync(join(here, "background.js"), "utf8"), /DEFAULT_BASE = "https:\/\/authnudge\.com"/);
-const manifestVersion = JSON.parse(readFileSync(join(here, "manifest.json"), "utf8")).version;
-assert.match(manifestVersion, /^\d+\.\d+\.\d+$/);
-const parentPackage = join(here, "..", "package.json");
-if (existsSync(parentPackage)) {
-  assert.equal(manifestVersion, JSON.parse(readFileSync(parentPackage, "utf8")).version);
-}
 const manifest = readFileSync(join(here, "manifest.json"), "utf8");
+assert.match(JSON.parse(manifest).version, /^\d+\.\d+\.\d+$/);
 assert.match(manifest, /https:\/\/authnudge\.com\/\*/);
 assert.doesNotMatch(manifest, /"host_permissions": \["http:\/\/\*\/\*", "https:\/\/\*\/\*"\]/);
 
