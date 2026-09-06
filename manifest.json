@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Authnudge",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Ask an Authnudge account holder to sign you in. The extension never shows the credentials.",
   "homepage_url": "https://authnudge.com",
   "action": {
