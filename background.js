@@ -1,6 +1,6 @@
 import { decryptEnvelope, generateRequesterKeys, requesterFingerprint, signRequest } from "./e2e.js";
 import { fillLoginForm } from "./fill.js";
-import { normalizeBaseUrl, normalizeOrigin, normalizeTo } from "./origin.js";
+import { normalizeBaseUrl, normalizeOrigin, normalizeTo, sameLoginHost } from "./origin.js";
 
 const DEFAULT_BASE = "https://authnudge.com";
 const ALARM = "authnudge-watch";
@@ -119,23 +119,71 @@ function toWsUrl(baseUrl, path, claimToken) {
   return url.toString();
 }
 
-async function injectFill(tabId, origin, identifier, secret) {
-  const tab = await getTab(tabId);
-  if (!tab?.url || normalizeOrigin(tab.url) !== origin) return { status: "page_changed" };
+function foldFillResults(injections) {
+  const results = (injections ?? []).map((item) => item?.result).filter(Boolean);
+  if (results.some((item) => item.ok)) return { ok: true };
+  if (results.some((item) => item.reason === "need_password")) return { ok: false, reason: "need_password" };
+  if (results.some((item) => item.reason === "no_form")) return { ok: false, reason: "no_form" };
+  if (results.some((item) => item.reason === "wrong_origin")) return { ok: false, reason: "wrong_origin" };
+  return { ok: false, reason: "need_password" };
+}
 
-  try {
-    const [inj] = await chrome.scripting.executeScript({
-      target: { tabId },
+function waitForFillRetry(tabId, deadline) {
+  return new Promise((resolve) => {
+    const leftover = Math.min(2000, Math.max(0, deadline - Date.now()));
+    const timer = setTimeout(finish, leftover);
+    const onUpdated = (id, info) => {
+      if (id === tabId && (info.status === "complete" || info.url)) finish();
+    };
+    function finish() {
+      clearTimeout(timer);
+      chrome.tabs.onUpdated.removeListener(onUpdated);
+      resolve();
+    }
+    chrome.tabs.onUpdated.addListener(onUpdated);
+  });
+}
+
+async function runFillOnce(tabId, origin, identifier, secret, waitMs) {
+  const inject = (allFrames) =>
+    chrome.scripting.executeScript({
+      target: { tabId, allFrames },
       func: fillLoginForm,
-      args: [identifier, secret, origin],
+      args: [identifier, secret, origin, waitMs],
     });
-    const result = inj?.result;
-    if (result?.ok) return { status: "filled" };
-    if (result?.reason === "wrong_origin") return { status: "page_changed" };
-    return { status: "no_form" };
+  try {
+    return foldFillResults(await inject(true));
   } catch {
-    return { status: "error", code: "generic" };
+    return foldFillResults(await inject(false));
   }
+}
+
+async function injectFill(tabId, origin, identifier, secret) {
+  const deadline = Date.now() + 45_000;
+  let waitMs = 15_000;
+
+  while (Date.now() < deadline) {
+    const tab = await getTab(tabId);
+    if (!tab?.url || !sameLoginHost(tab.url, origin)) return { status: "page_changed" };
+
+    let result;
+    try {
+      result = await runFillOnce(tabId, origin, identifier, secret, waitMs);
+    } catch {
+      result = { ok: false, reason: "need_password" };
+    }
+
+    if (result.ok) return { status: "filled" };
+    if (result.reason === "wrong_origin") return { status: "page_changed" };
+    if (result.reason === "no_form") return { status: "no_form" };
+
+    waitMs = 4_000;
+    await waitForFillRetry(tabId, deadline);
+  }
+
+  const tab = await getTab(tabId);
+  if (!tab?.url || !sameLoginHost(tab.url, origin)) return { status: "page_changed" };
+  return { status: "no_form" };
 }
 
 async function useEnvelope(tabId, origin, envelope, privateKey, requestId, requesterPublicKey) {

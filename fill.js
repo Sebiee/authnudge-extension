@@ -1,7 +1,8 @@
 // Self-contained: chrome.scripting.executeScript serializes this function.
 // Return status only — never field values.
-export function fillLoginForm(identifier, secret, expectedOrigin) {
-  const normalize = (tabUrl) => {
+// ponytail: no shadow-DOM / cross-host iframe recipes; add a site list if real logins stay unfilled.
+export async function fillLoginForm(identifier, secret, expectedOrigin, waitMs = 15000) {
+  const hostOf = (tabUrl) => {
     let url;
     try {
       url = new URL(tabUrl);
@@ -10,13 +11,16 @@ export function fillLoginForm(identifier, secret, expectedOrigin) {
     }
     if (url.protocol !== "https:" && url.protocol !== "http:") return null;
     if (!url.hostname) return null;
-    const path = url.pathname === "/" ? "" : url.pathname.replace(/\/+$/, "");
-    return `${url.protocol}//${url.host.toLowerCase()}${path}`;
+    return `${url.protocol}//${url.host.toLowerCase()}`;
+  };
+  const sameHost = () => {
+    if (!expectedOrigin) return true;
+    const left = hostOf(location.href);
+    const right = hostOf(expectedOrigin);
+    return Boolean(left && right && left === right);
   };
 
-  if (expectedOrigin && normalize(location.href) !== expectedOrigin) {
-    return { ok: false, reason: "wrong_origin" };
-  }
+  if (!sameHost()) return { ok: false, reason: "wrong_origin" };
 
   const visible = (el) => {
     if (!el || el.disabled) return false;
@@ -37,25 +41,40 @@ export function fillLoginForm(identifier, secret, expectedOrigin) {
     el.dispatchEvent(new Event("change", { bubbles: true }));
   };
 
+  const hint = (el) =>
+    `${el.autocomplete || ""} ${el.name || ""} ${el.id || ""} ${el.placeholder || ""} ${el.getAttribute("inputmode") || ""}`.toLowerCase();
+
   const scoreIdentifier = (el) => {
     const type = (el.type || "text").toLowerCase();
-    const auto = (el.autocomplete || "").toLowerCase();
-    if (type === "email") return 3;
-    if (auto.includes("username")) return 2;
+    const text = hint(el);
+    if (type === "email" || text.includes("email")) return 4;
+    if (text.includes("username") || text.includes("user")) return 3;
+    if (/(^|[^a-z])(login|identifier|acct|account)([^a-z]|$)/.test(text)) return 2;
     return 1;
   };
 
-  const pickIdentifier = (scope, passwordEl) => {
-    const nodes = [...scope.querySelectorAll("input")].filter((el) => {
-      if (!visible(el) || el === passwordEl) return false;
+  const identifiers = () =>
+    [...document.querySelectorAll("input")].filter((el) => {
+      if (!visible(el)) return false;
       const type = (el.type || "text").toLowerCase();
       if (["password", "hidden", "submit", "button", "checkbox", "radio", "file", "reset", "image"].includes(type)) {
         return false;
       }
       return ["email", "text", "tel", "search", "url"].includes(type);
     });
+
+  const passwords = () =>
+    [...document.querySelectorAll("input[type=password]")].filter((el) => {
+      if (!visible(el)) return false;
+      return !hint(el).includes("new-password");
+    });
+
+  const pickIdentifier = (scope, passwordEl) => {
+    const nodes = identifiers().filter((el) => (!scope || scope.contains(el)) && el !== passwordEl);
     if (!nodes.length) return null;
-    const before = nodes.filter((el) => passwordEl.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_PRECEDING);
+    const before = passwordEl
+      ? nodes.filter((el) => passwordEl.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_PRECEDING)
+      : nodes;
     const pool = before.length ? before : nodes;
     let best = pool[0];
     for (const el of pool) {
@@ -64,37 +83,85 @@ export function fillLoginForm(identifier, secret, expectedOrigin) {
     return best;
   };
 
-  const passwords = [...document.querySelectorAll("input[type=password]")].filter(visible);
-  const groups = new Map();
-  for (const pwd of passwords) {
-    const form = pwd.form;
-    const key = form ?? pwd;
-    const entry = groups.get(key) ?? { form, passwords: [] };
-    entry.passwords.push(pwd);
-    groups.set(key, entry);
+  const wipePassword = (el) => {
+    const desc = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value");
+    if (desc?.set) desc.set.call(el, "");
+    else el.value = "";
+  };
+
+  const submitForm = (form) => {
+    if (form) {
+      const submit =
+        form.querySelector("button[type=submit], input[type=submit]") || form.querySelector("button:not([type])");
+      if (submit && visible(submit) && !submit.disabled) {
+        submit.click();
+        return true;
+      }
+      if (typeof form.requestSubmit === "function") {
+        form.requestSubmit();
+        return true;
+      }
+    }
+    const next = [...document.querySelectorAll("button, input[type=submit], [role=button]")].find((el) => {
+      if (!visible(el) || el.disabled) return false;
+      return /^(continue|next|log\s*in|sign\s*in|submit)$/i.test((el.textContent || el.value || "").trim());
+    });
+    if (next) {
+      next.click();
+      return true;
+    }
+    return false;
+  };
+
+  const submitThenWipe = (form, passwordEl) => {
+    const formEl = form || passwordEl.form;
+    const wipe = () => wipePassword(passwordEl);
+    if (formEl) formEl.addEventListener("submit", () => queueMicrotask(wipe), { once: true });
+    if (submitForm(formEl)) queueMicrotask(wipe);
+  };
+
+  const waitForPassword = (ms) =>
+    new Promise((resolve) => {
+      const finish = (value) => {
+        observer.disconnect();
+        clearTimeout(timer);
+        resolve(value);
+      };
+      const check = () => {
+        if (!sameHost()) return finish(null);
+        const found = passwords();
+        if (found.length === 1) return finish(found[0]);
+        if (found.length > 1) return finish(null);
+      };
+      const observer = new MutationObserver(check);
+      observer.observe(document.documentElement, { childList: true, subtree: true, attributes: true });
+      const timer = setTimeout(() => finish(passwords().length === 1 ? passwords()[0] : null), ms);
+      check();
+    });
+
+  const pwdFields = passwords();
+  if (pwdFields.length > 1) return { ok: false, reason: "no_form" };
+
+  if (pwdFields.length === 1) {
+    const passwordEl = pwdFields[0];
+    const userEl = pickIdentifier(passwordEl.form ?? document, passwordEl);
+    if (userEl) write(userEl, identifier);
+    write(passwordEl, secret);
+    submitThenWipe(passwordEl.form, passwordEl);
+    return { ok: true };
   }
 
-  const candidates = [];
-  for (const entry of groups.values()) {
-    if (entry.passwords.length !== 1) continue;
-    const passwordEl = entry.passwords[0];
-    const scope = entry.form ?? document;
-    const userEl = pickIdentifier(scope, passwordEl);
-    if (userEl) candidates.push({ form: entry.form, passwordEl, userEl });
-  }
+  const userEl = pickIdentifier(document, null);
+  if (!userEl) return { ok: false, reason: "no_form" };
 
-  if (candidates.length !== 1) return { ok: false, reason: "no_form" };
-
-  const { form, passwordEl, userEl } = candidates[0];
   write(userEl, identifier);
+  submitForm(userEl.form);
+
+  const passwordEl = await waitForPassword(waitMs);
+  if (!sameHost()) return { ok: false, reason: "wrong_origin" };
+  if (!passwordEl) return { ok: false, reason: "need_password" };
+
   write(passwordEl, secret);
-
-  if (form) {
-    const submit =
-      form.querySelector("button[type=submit], input[type=submit]") || form.querySelector("button:not([type])");
-    if (submit && visible(submit) && !submit.disabled) submit.click();
-    else if (typeof form.requestSubmit === "function") form.requestSubmit();
-  }
-
+  submitThenWipe(passwordEl.form, passwordEl);
   return { ok: true };
 }

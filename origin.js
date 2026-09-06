@@ -1,3 +1,16 @@
+export function originHost(tabUrl) {
+  const origin = normalizeOrigin(tabUrl);
+  if (!origin) return null;
+  const url = new URL(origin);
+  return `${url.protocol}//${url.host.toLowerCase()}`;
+}
+
+export function sameLoginHost(tabUrl, requestedOrigin) {
+  const left = originHost(tabUrl);
+  const right = originHost(requestedOrigin);
+  return Boolean(left && right && left === right);
+}
+
 export function normalizeOrigin(tabUrl) {
   let url;
   try {

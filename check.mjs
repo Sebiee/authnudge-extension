@@ -4,13 +4,16 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { decryptEnvelope, encryptForRequester, generateRequesterKeys, requesterFingerprint, signRequest } from "./e2e.js";
 import { fillLoginForm } from "./fill.js";
-import { normalizeBaseUrl, normalizeOrigin, normalizeTo } from "./origin.js";
+import { normalizeBaseUrl, normalizeOrigin, normalizeTo, sameLoginHost } from "./origin.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
 assert.equal(normalizeOrigin("https://X.com/login?foo=1#bar"), "https://x.com/login");
 assert.equal(normalizeOrigin("https://x.com/"), "https://x.com");
 assert.equal(normalizeOrigin("https://x.com/login/"), "https://x.com/login");
+assert.equal(sameLoginHost("https://x.com/password", "https://x.com/login"), true);
+assert.equal(sameLoginHost("https://evil.com/login", "https://x.com/login"), false);
+assert.equal(sameLoginHost("chrome://extensions", "https://x.com/login"), false);
 assert.equal(normalizeOrigin("chrome://extensions"), null);
 assert.equal(normalizeOrigin("about:blank"), null);
 assert.equal(normalizeTo("@Alice"), "alice");
@@ -65,6 +68,9 @@ assert.match(background, /requestId, requesterPublicKey/);
 
 const src = fillLoginForm.toString();
 assert.match(src, /return \{ ok: true \}/);
+assert.match(src, /need_password/);
+assert.match(src, /MutationObserver/);
+assert.match(src, /wipePassword/);
 assert.doesNotMatch(src, /return \{[^}]*identifier|return \{[^}]*secret/);
 
 const ui = ["popup.html", "popup.js", "popup.css"].map((name) => readFileSync(join(here, name), "utf8")).join("\n");
