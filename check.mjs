@@ -44,10 +44,26 @@ const verifyKey = await crypto.subtle.importKey(
 const message = new TextEncoder().encode(`authnudge-request-v1\n${to}\n${origin}\n${keys.publicKey}`);
 assert.equal(await crypto.subtle.verify({ name: "ECDSA", hash: "SHA-256" }, verifyKey, unb64(signature), message), true);
 
-const envelope = await encryptForRequester(keys.publicKey, { username: "u", password: "p", extra: true });
-const plain = await decryptEnvelope(keys.privateKey, envelope);
+const requestId = "req-check";
+const envelope = await encryptForRequester(
+  keys.publicKey,
+  { username: "u", password: "p", origin, extra: true },
+  requestId,
+);
+const plain = await decryptEnvelope(keys.privateKey, envelope, {
+  requestId,
+  requesterPublicKey: keys.publicKey,
+});
 assert.equal(plain.username, "u");
 assert.equal(plain.password, "p");
+assert.equal(plain.origin, origin);
+await assert.rejects(() =>
+  decryptEnvelope(keys.privateKey, envelope, { requestId: "other", requesterPublicKey: keys.publicKey }),
+);
+
+const background = readFileSync(join(here, "background.js"), "utf8");
+assert.match(background, /payload\?\.origin !== origin/);
+assert.match(background, /requestId, requesterPublicKey/);
 
 const src = fillLoginForm.toString();
 assert.match(src, /return \{ ok: true \}/);

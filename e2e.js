@@ -60,13 +60,18 @@ export async function signRequest(privateKeyB64, { to, handle, origin, publicKey
   return b64(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, key, message));
 }
 
-export async function encryptForRequester(requesterPublicKey, payload) {
+export function envelopeAad(requestId, requesterPublicKey) {
+  return new TextEncoder().encode(`authnudge-envelope-v1\n${requestId}\n${requesterPublicKey}`);
+}
+
+export async function encryptForRequester(requesterPublicKey, payload, requestId) {
   const requesterPub = await importPublic(requesterPublicKey);
   const ephemeral = await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
   const aesKey = await deriveAesKey(ephemeral.privateKey, requesterPub, "encrypt");
   const iv = crypto.getRandomValues(new Uint8Array(12));
+  const additionalData = envelopeAad(requestId, requesterPublicKey);
   const ciphertext = await crypto.subtle.encrypt(
-    { name: "AES-GCM", iv },
+    { name: "AES-GCM", iv, additionalData },
     aesKey,
     new TextEncoder().encode(JSON.stringify(payload)),
   );
@@ -77,7 +82,7 @@ export async function encryptForRequester(requesterPublicKey, payload) {
   };
 }
 
-export async function decryptEnvelope(privateKeyB64, envelope) {
+export async function decryptEnvelope(privateKeyB64, envelope, { requestId, requesterPublicKey }) {
   const privateKey = await crypto.subtle.importKey(
     "pkcs8",
     unb64(privateKeyB64),
@@ -87,8 +92,9 @@ export async function decryptEnvelope(privateKeyB64, envelope) {
   );
   const ephemeralPub = await importPublic(envelope.ephemeralPublicKey);
   const aesKey = await deriveAesKey(privateKey, ephemeralPub, "decrypt");
+  const additionalData = envelopeAad(requestId, requesterPublicKey);
   const plaintext = await crypto.subtle.decrypt(
-    { name: "AES-GCM", iv: unb64(envelope.iv) },
+    { name: "AES-GCM", iv: unb64(envelope.iv), additionalData },
     aesKey,
     unb64(envelope.ciphertext),
   );

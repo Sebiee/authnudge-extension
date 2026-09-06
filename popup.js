@@ -44,7 +44,9 @@ function paintStatus(status, extra = {}) {
 }
 
 function render(state) {
-  $("fingerprint").textContent = state.fingerprint ? `Fingerprint ${state.fingerprint}` : "Pairing…";
+  $("fingerprint").textContent = state.fingerprint
+    ? `Encryption key ${state.fingerprint} — compare with the grant page`
+    : "Pairing…";
   $("public-key").value = state.publicKey ?? "";
   $("base-url").value = state.baseUrl ?? "";
   tabId = state.tabId ?? tabId;
@@ -113,7 +115,9 @@ $("regenerate").addEventListener("click", async () => {
   if (!confirm("This breaks pairing until you save the new public key. Continue?")) return;
   const next = await send({ type: "regenerateKey" });
   $("public-key").value = next.publicKey ?? "";
-  $("fingerprint").textContent = next.fingerprint ? `Fingerprint ${next.fingerprint}` : "Pairing…";
+  $("fingerprint").textContent = next.fingerprint
+    ? `Encryption key ${next.fingerprint} — compare with the grant page`
+    : "Pairing…";
   paintStatus(null);
 });
 

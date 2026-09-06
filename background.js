@@ -138,14 +138,19 @@ async function injectFill(tabId, origin, identifier, secret) {
   }
 }
 
-async function useEnvelope(tabId, origin, envelope, privateKey) {
+async function useEnvelope(tabId, origin, envelope, privateKey, requestId, requesterPublicKey) {
   let payload;
   try {
-    payload = await decryptEnvelope(privateKey, envelope);
+    payload = await decryptEnvelope(privateKey, envelope, { requestId, requesterPublicKey });
   } catch {
     return { status: "error", code: "generic" };
   } finally {
     envelope = null;
+  }
+
+  if (payload?.origin !== origin) {
+    payload = null;
+    return { status: "error", code: "generic" };
   }
 
   const identifier = payload?.username;
@@ -177,7 +182,7 @@ async function finishEnvelope(meta, envelope) {
   await dropClaim();
 
   const keys = await ensureKeys();
-  const result = await useEnvelope(meta.tabId, meta.origin, envelope, keys.privateKey);
+  const result = await useEnvelope(meta.tabId, meta.origin, envelope, keys.privateKey, meta.requestId, keys.publicKey);
   live = { tabId: meta.tabId, origin: meta.origin, expiresAt: meta.expiresAt, status: result.status };
   pushStatus(result.status, result.code ? { code: result.code } : {});
 }
