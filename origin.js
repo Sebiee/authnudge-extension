@@ -5,10 +5,23 @@ export function originHost(tabUrl) {
   return `${url.protocol}//${url.host.toLowerCase()}`;
 }
 
+/** Optional host permission for this tab only, never a wildcard host. */
+export function hostPermissionPattern(tabUrl) {
+  const host = originHost(tabUrl);
+  return host ? `${host}/*` : null;
+}
+
 export function sameLoginHost(tabUrl, requestedOrigin) {
   const left = originHost(tabUrl);
   const right = originHost(requestedOrigin);
   return Boolean(left && right && left === right);
+}
+
+/** Probe results whose `result` is protocol+host of the grant. Empty grant → no frames. */
+export function frameIdsMatchingHost(probes, expectedOrigin) {
+  const want = originHost(expectedOrigin);
+  if (!want) return [];
+  return (probes ?? []).filter((item) => item?.result === want).map((item) => item.frameId);
 }
 
 export function normalizeOrigin(tabUrl) {

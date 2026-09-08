@@ -38,4 +38,4 @@ jobs:
           gh release create "$GITHUB_REF_NAME" \
             "authnudge-extension-v${ver}.zip" \
             --title "Authnudge ${GITHUB_REF_NAME}" \
-            --notes "Unzip, open chrome://extensions, enable Developer mode, Load unpacked, and choose the unzipped folder."
+            --notes "Install from the Chrome Web Store: https://chromewebstore.google.com/detail/authnudge/blcpeglclodcfkmakeilegdknbdaglpa (Add to Chrome). This zip is the store upload artifact. Contributors: Load unpacked from the repo for development."

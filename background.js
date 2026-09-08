@@ -1,8 +1,23 @@
 import { decryptEnvelope, generateRequesterKeys, requesterFingerprint, signRequest } from "./e2e.js";
-import { fillLoginForm } from "./fill.js";
-import { resolveBaseUrl, normalizeOrigin, normalizeTo, sameLoginHost } from "./origin.js";
+import { fillLoginForm, fillResultStatus } from "./fill.js";
+import { resolveBaseUrl, normalizeOrigin, normalizeTo, originHost, sameLoginHost, frameIdsMatchingHost } from "./origin.js";
 
 const ALARM = "authnudge-watch";
+const RELAY_TTL_MS = 10 * 60 * 1000;
+const OTP_QUIET_MS = 8_000; // after the password step: no code prompt within this much quiet = done
+const OTP_WATCH_MS = 20_000; // hard cap on that watch
+const STEP_SETTLE_MS = 6_000; // after submit, how long the password/OTP step gets to go away
+
+function isPermissionDenied(err) {
+  return /manifest must request permission|host permission/i.test(String(err?.message ?? err ?? ""));
+}
+
+function tabAccess(tab, origin) {
+  if (!tab) return { status: "page_changed" };
+  if (!tab.url) return { status: "permission_denied" };
+  if (!sameLoginHost(tab.url, origin)) return { status: "page_changed" };
+  return null;
+}
 
 let devBaseRaw;
 
@@ -77,7 +92,12 @@ async function getState(tabId) {
   if (!live) {
     const meta = claim ?? (await loadClaim());
     if (meta && Date.now() < meta.expiresAt) {
-      live = { tabId: meta.tabId, origin: meta.origin, expiresAt: meta.expiresAt, status: "waiting" };
+      live = {
+        tabId: meta.tabId,
+        origin: meta.origin,
+        expiresAt: meta.expiresAt,
+        status: meta.gotPassword ? "filling" : "waiting",
+      };
     }
   }
   const keys = await ensureKeys();
@@ -114,18 +134,19 @@ async function regenerateKey() {
   };
 }
 
-function toWsUrl(baseUrl, path, claimToken) {
+function toWsUrl(baseUrl, path) {
   const url = new URL(path, baseUrl);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-  url.searchParams.set("claim", claimToken);
   return url.toString();
 }
 
 function foldFillResults(injections) {
   const results = (injections ?? []).map((item) => item?.result).filter(Boolean);
+  // Callers inject only granted-host frames; a foreign iframe must never count as success.
   if (results.some((item) => item.ok)) return { ok: true };
+  if (results.some((item) => item.reason === "permission_denied")) return { ok: false, reason: "permission_denied" };
   if (results.some((item) => item.reason === "need_password")) return { ok: false, reason: "need_password" };
-  if (results.some((item) => item.reason === "no_form")) return { ok: false, reason: "no_form" };
+  if (results.some((item) => item.reason === "no_form" || item.reason === "no_otp")) return { ok: false, reason: "no_form" };
   if (results.some((item) => item.reason === "wrong_origin")) return { ok: false, reason: "wrong_origin" };
   return { ok: false, reason: "need_password" };
 }
@@ -147,16 +168,59 @@ function waitForFillRetry(tabId, deadline) {
 }
 
 async function runFillOnce(tabId, origin, identifier, secret, waitMs, mode = "password") {
-  const inject = (allFrames) =>
+  const want = originHost(origin);
+  if (!want) return { ok: false, reason: "wrong_origin" };
+  const fill = (target) =>
     chrome.scripting.executeScript({
-      target: { tabId, allFrames },
+      target,
       func: fillLoginForm,
       args: [identifier, secret, origin, waitMs, mode],
     });
   try {
-    return foldFillResults(await inject(true));
-  } catch {
-    return foldFillResults(await inject(false));
+    const probed = await chrome.scripting.executeScript({
+      target: { tabId, allFrames: true },
+      func: () => {
+        try {
+          const url = new URL(location.href);
+          if ((url.protocol !== "https:" && url.protocol !== "http:") || !url.hostname) return "";
+          return `${url.protocol}//${url.host.toLowerCase()}`;
+        } catch {
+          return "";
+        }
+      },
+    });
+    const frameIds = frameIdsMatchingHost(probed, origin);
+    if (!frameIds.length) return { ok: false, reason: "wrong_origin" };
+    return foldFillResults(await fill({ tabId, frameIds }));
+  } catch (err) {
+    if (isPermissionDenied(err)) return { ok: false, reason: "permission_denied" };
+    try {
+      return foldFillResults(await fill({ tabId }));
+    } catch (fallbackErr) {
+      if (isPermissionDenied(fallbackErr)) return { ok: false, reason: "permission_denied" };
+      throw fallbackErr;
+    }
+  }
+}
+
+async function waitForStep(tabId, origin, mode) {
+  const deadline = Date.now() + STEP_SETTLE_MS;
+  while (true) {
+    const blocked = tabAccess(await getTab(tabId), origin);
+    if (blocked) return blocked;
+    let probe;
+    try {
+      probe = await runFillOnce(tabId, origin, "", "", 0, mode);
+    } catch (err) {
+      if (isPermissionDenied(err)) return { status: "permission_denied" };
+      probe = { ok: true };
+    }
+    if (probe.reason === "permission_denied") return { status: "permission_denied" };
+    if (!probe.ok) return { onStep: false };
+    if (Date.now() >= deadline) {
+      return probe.reason === "wrong_origin" ? { status: "page_changed" } : { onStep: true };
+    }
+    await new Promise((resolve) => setTimeout(resolve, 700));
   }
 }
 
@@ -165,17 +229,23 @@ async function injectFill(tabId, origin, identifier, secret) {
   let waitMs = 15_000;
 
   while (Date.now() < deadline) {
-    const tab = await getTab(tabId);
-    if (!tab?.url || !sameLoginHost(tab.url, origin)) return { status: "page_changed" };
+    const blocked = tabAccess(await getTab(tabId), origin);
+    if (blocked) return blocked;
 
     let result;
     try {
       result = await runFillOnce(tabId, origin, identifier, secret, waitMs);
-    } catch {
+    } catch (err) {
+      if (isPermissionDenied(err)) return { status: "permission_denied" };
       result = { ok: false, reason: "need_password" };
     }
 
-    if (result.ok) return { status: "filled" };
+    if (result.reason === "permission_denied") return { status: "permission_denied" };
+    if (result.ok) {
+      const still = await waitForStep(tabId, origin, "detect-password");
+      if (still.status) return still;
+      return { status: fillResultStatus(result, still.onStep) };
+    }
     if (result.reason === "wrong_origin") return { status: "page_changed" };
     if (result.reason === "no_form") return { status: "no_form" };
 
@@ -183,9 +253,7 @@ async function injectFill(tabId, origin, identifier, secret) {
     await waitForFillRetry(tabId, deadline);
   }
 
-  const tab = await getTab(tabId);
-  if (!tab?.url || !sameLoginHost(tab.url, origin)) return { status: "page_changed" };
-  return { status: "no_form" };
+  return tabAccess(await getTab(tabId), origin) ?? { status: "no_form" };
 }
 
 async function useEnvelope(tabId, origin, envelope, privateKey, requestId, requesterPublicKey, step) {
@@ -209,7 +277,12 @@ async function useEnvelope(tabId, origin, envelope, privateKey, requestId, reque
     if (typeof code !== "string" || !code.trim()) return { status: "error", code: "generic" };
     pushStatus("filling");
     const result = await runFillOnce(tabId, origin, "", code.trim(), 0, "otp");
-    if (result.ok) return { status: "filled" };
+    if (result.reason === "permission_denied") return { status: "permission_denied" };
+    if (result.ok) {
+      const still = await waitForStep(tabId, origin, "detect-otp");
+      if (still.status) return still;
+      return { status: fillResultStatus(result, still.onStep, "otp") };
+    }
     if (result.reason === "wrong_origin") return { status: "page_changed" };
     return { status: "no_form" };
   }
@@ -226,8 +299,7 @@ async function useEnvelope(tabId, origin, envelope, privateKey, requestId, reque
 }
 
 async function detectOtp(tabId, origin) {
-  const result = await runFillOnce(tabId, origin, "", "", 0, "detect-otp");
-  return result.ok;
+  return runFillOnce(tabId, origin, "", "", 0, "detect-otp");
 }
 
 async function askOtp(meta) {
@@ -240,27 +312,77 @@ async function askOtp(meta) {
       },
       body: JSON.stringify({ type: "otp" }),
     });
-    return res.ok || res.status === 409;
+    if (!res.ok && res.status !== 409) return false;
+    const body = await res.json().catch(() => ({}));
+    if (body.expiresAt) {
+      meta.expiresAt = Date.parse(body.expiresAt) || meta.expiresAt;
+      if (live) live.expiresAt = meta.expiresAt;
+      await saveClaim(meta);
+    }
+    return true;
   } catch {
     return false;
   }
 }
 
-async function watchForOtp(meta, waitClear = false) {
-  const deadline = Date.now() + 110_000;
+async function markDone(meta) {
+  try {
+    await fetch(`${meta.baseUrl}/api/v1/requests/${meta.requestId}/done`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${meta.claimToken}` },
+    });
+  } catch {
+    /* the relay's own alarm resolves it a little later */
+  }
+}
+
+/** Password (or code) is in. Watch briefly for a one-time-code prompt; if one shows, ask the phone. */
+async function afterFill(meta, waitClear = false) {
+  const cap = Date.now() + OTP_WATCH_MS;
+  let quietUntil = Date.now() + OTP_QUIET_MS;
   let wait = waitClear;
-  while (meta.gen !== settledGen && Date.now() < deadline) {
+  let lastUrl = "";
+  while (meta.gen !== settledGen && Date.now() < Math.min(cap, wait ? cap : quietUntil)) {
     const tab = await getTab(meta.tabId);
-    if (!tab?.url || !sameLoginHost(tab.url, meta.origin)) return;
+    const blocked = tabAccess(tab, meta.origin);
+    if (blocked) return finishWith(meta, blocked);
+    if (tab.url !== lastUrl || tab.status !== "complete") {
+      lastUrl = tab.url;
+      quietUntil = Date.now() + OTP_QUIET_MS;
+    }
     const found = await detectOtp(meta.tabId, meta.origin);
+    if (found.reason === "permission_denied") return finishWith(meta, { status: "permission_denied" });
+    if (found.reason === "wrong_origin") return finishWith(meta, { status: "page_changed" });
     if (wait) {
-      if (!found) wait = false;
-    } else if (found) {
-      await askOtp(meta);
+      if (!found.ok) {
+        wait = false;
+        quietUntil = Date.now() + OTP_QUIET_MS;
+      }
+    } else if (found.ok) {
+      if (!(await askOtp(meta))) {
+        return finishWith(meta, { status: "otp" });
+      }
       return;
     }
-    await new Promise((resolve) => setTimeout(resolve, 2000));
+    await new Promise((resolve) => setTimeout(resolve, 700));
   }
+  if (meta.gen === settledGen) return;
+  const blocked = tabAccess(await getTab(meta.tabId), meta.origin);
+  if (blocked) return finishWith(meta, blocked);
+  const otp = await detectOtp(meta.tabId, meta.origin);
+  if (otp.reason === "permission_denied") return finishWith(meta, { status: "permission_denied" });
+  if (otp.reason === "wrong_origin") return finishWith(meta, { status: "page_changed" });
+  if (otp.ok) {
+    if (!(await askOtp(meta))) return finishWith(meta, { status: "otp" });
+    return;
+  }
+  const password = await runFillOnce(meta.tabId, meta.origin, "", "", 0, "detect-password");
+  if (password.reason === "permission_denied") return finishWith(meta, { status: "permission_denied" });
+  if (password.reason === "wrong_origin") return finishWith(meta, { status: "page_changed" });
+  const status = fillResultStatus({ ok: true }, password.ok);
+  if (status !== "filled") return finishWith(meta, { status });
+  await markDone(meta);
+  await finishFilled(meta);
 }
 
 async function finishExpired(meta) {
@@ -311,15 +433,21 @@ async function handleEnvelope(meta, envelope, kind) {
   );
   if (kind === "otp") {
     if (result.status !== "filled") return finishWith(meta, result);
+    meta.otpRounds = (meta.otpRounds || 0) + 1;
+    await saveClaim(meta);
+    if (meta.otpRounds >= 2) {
+      await markDone(meta);
+      return finishFilled(meta);
+    }
     pushStatus("filling");
-    void watchForOtp(meta, true);
+    void afterFill(meta, true);
     return;
   }
   if (result.status !== "filled") return finishWith(meta, result);
   meta.gotPassword = true;
   await saveClaim(meta);
   pushStatus("filling");
-  void watchForOtp(meta);
+  void afterFill(meta);
 }
 
 async function pollOnce(meta) {
@@ -328,6 +456,10 @@ async function pollOnce(meta) {
     const res = await fetch(`${meta.baseUrl}/api/v1/requests/${meta.requestId}`, {
       headers: { authorization: `Bearer ${meta.claimToken}` },
     });
+    if (res.status === 404 || res.status === 410) {
+      await finishExpired(meta);
+      return true;
+    }
     if (!res.ok) return false;
     const data = await res.json();
     if (data.expiresAt) meta.expiresAt = Date.parse(data.expiresAt) || meta.expiresAt;
@@ -354,7 +486,8 @@ function connectSocket(meta) {
   if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) return;
   stopSocket();
   try {
-    socket = new WebSocket(toWsUrl(meta.baseUrl, `/api/v1/requests/${meta.requestId}/ws`, meta.claimToken));
+    // Browser WS cannot set Authorization; Authnudge2 reads subprotocol claim.<token> (query claims are ignored).
+    socket = new WebSocket(toWsUrl(meta.baseUrl, `/api/v1/requests/${meta.requestId}/ws`), [`claim.${meta.claimToken}`]);
   } catch {
     return;
   }
@@ -420,19 +553,26 @@ async function startRequest({ to, tabId }) {
   const address = normalizeTo(to);
   if (!address) return { status: "error", code: "generic", message: "Enter an email or handle." };
   if (inFlight) return { status: live?.status ?? "waiting", expiresAt: live?.expiresAt ?? null };
+
+  const tab = await getTab(tabId);
+  if (tab && !tab.url) return { status: "permission_denied" };
+  const origin = tab?.url ? normalizeOrigin(tab.url) : null;
+  if (!origin) return { status: "error", code: "bad_tab" };
+
   const existing = claim ?? (await loadClaim());
-  if (existing && Date.now() < existing.expiresAt) {
-    return { status: "waiting", expiresAt: existing.expiresAt };
+  if (existing && Date.now() < existing.expiresAt && existing.origin === origin) {
+    if (!claim) {
+      if (!existing.gen) existing.gen = ++requestGen;
+      await armWatch(existing);
+      void pollOnce(existing);
+    }
+    return { status: live?.status ?? "waiting", expiresAt: existing.expiresAt };
   }
 
   inFlight = true;
   try {
-    const tab = await getTab(tabId);
-    const origin = tab?.url ? normalizeOrigin(tab.url) : null;
-    if (!origin) return { status: "error", code: "bad_tab" };
-
     const keys = await ensureKeys();
-    const signature = await signRequest(keys.privateKey, { to: address, origin, publicKey: keys.publicKey });
+    const { signature, issuedAt } = await signRequest(keys.privateKey, { to: address, origin, publicKey: keys.publicKey });
     const baseUrl = await apiBase();
 
     let created;
@@ -445,17 +585,21 @@ async function startRequest({ to, tabId }) {
           origin,
           requesterPublicKey: keys.publicKey,
           signature,
+          issuedAt,
         }),
       });
       created = await res.json().catch(() => ({}));
       if (res.status === 401) return { status: "error", code: "pairing" };
       if (res.status === 429) return { status: "error", code: "generic", message: "Too many requests. Try again shortly." };
-      if (res.status !== 201) return { status: "error", code: "generic" };
+      if (res.status !== 201 && res.status !== 200) return { status: "error", code: "generic" }; // 200 = reattached to a still-open request
     } catch {
       return { status: "error", code: "generic", message: "Could not reach Authnudge." };
     }
 
-    const expiresAt = Date.parse(created.expiresAt) || Date.now() + 5 * 60 * 1000;
+    if (existing?.gen) settledGen = existing.gen;
+    stopSocket();
+
+    const expiresAt = Date.parse(created.expiresAt) || Date.now() + RELAY_TTL_MS;
     const meta = {
       gen: ++requestGen,
       requestId: created.requestId,
@@ -474,7 +618,8 @@ async function startRequest({ to, tabId }) {
   }
 }
 
-chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (sender.id !== chrome.runtime.id) return;
   const run = async () => {
     if (msg?.type === "getState") return getState(msg.tabId);
     if (msg?.type === "regenerateKey") return regenerateKey();

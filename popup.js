@@ -1,4 +1,4 @@
-import { DEFAULT_BASE, normalizeTo } from "./origin.js";
+import { DEFAULT_BASE, hostPermissionPattern, normalizeTo } from "./origin.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -20,6 +20,10 @@ function statusCopy(status, extra = {}) {
   if (status === "waiting") return `Waiting for approval… ${remaining()}`;
   if (status === "filling") return "Signing you in…";
   if (status === "filled") return "Signed in";
+  if (status === "otp") return "The site asked for a one-time code. Type it in this tab.";
+  if (status === "need_password") return "The site stayed on the password step.";
+  if (status === "need_permission") return "Allow access to this page so sign-in can finish after the popup closes.";
+  if (status === "permission_denied") return "The extension could not read this tab. Open the popup on the login page and allow access.";
   if (status === "no_form") return "Could not find a login form";
   if (status === "expired") return "Request timed out";
   if (status === "page_changed") return "The page changed, so sign-in was cancelled.";
@@ -38,7 +42,7 @@ function paintStatus(status, extra = {}) {
   const el = $("status");
   el.textContent = status ? statusCopy(status, extra) : "";
   el.classList.toggle("ok", status === "filled");
-  el.classList.toggle("err", Boolean(status) && !["waiting", "filling", "filled"].includes(status));
+  el.classList.toggle("err", Boolean(status) && !["waiting", "filling", "filled", "otp"].includes(status));
   const busy = status === "waiting" || status === "filling";
   $("send").disabled = busy || $("send").dataset.blocked === "1";
 }
@@ -87,8 +91,23 @@ $("request-form").addEventListener("submit", async (event) => {
     paintStatus("error", { message: "Enter an email or handle." });
     return;
   }
+  const pattern = hostPermissionPattern($("origin").textContent);
+  if (!pattern) {
+    paintStatus("error", { code: "bad_tab" });
+    return;
+  }
+  let allowed = false;
+  try {
+    allowed = await chrome.permissions.request({ origins: [pattern] });
+  } catch {
+    allowed = false;
+  }
+  if (!allowed) {
+    paintStatus("need_permission");
+    return;
+  }
   await persistHandle();
-  paintStatus("waiting", { expiresAt: Date.now() + 5 * 60 * 1000 });
+  paintStatus("waiting", { expiresAt: Date.now() + 10 * 60 * 1000 });
   try {
     const result = await send({ type: "request", to, tabId });
     paintStatus(result.status, result);

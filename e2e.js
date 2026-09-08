@@ -1,4 +1,4 @@
-// Vendored from public/e2e.js — keep algorithms in sync. Do not fetch at runtime.
+// Vendored from Authnudge2 public/e2e.js — keep algorithms in sync. Do not fetch at runtime.
 const INFO = new TextEncoder().encode("authnudge-v1");
 const EMPTY_SALT = new Uint8Array(32);
 
@@ -47,8 +47,9 @@ export async function generateRequesterKeys() {
   };
 }
 
-export async function signRequest(privateKeyB64, { to, handle, origin, publicKey }) {
+export async function signRequest(privateKeyB64, { to, handle, origin, publicKey, issuedAt }) {
   const address = (to ?? handle ?? "").trim().toLowerCase().replace(/^@+/, "");
+  const ts = Number.isInteger(issuedAt) && issuedAt > 0 ? issuedAt : Math.floor(Date.now() / 1000);
   const key = await crypto.subtle.importKey(
     "pkcs8",
     unb64(privateKeyB64),
@@ -56,8 +57,9 @@ export async function signRequest(privateKeyB64, { to, handle, origin, publicKey
     false,
     ["sign"],
   );
-  const message = new TextEncoder().encode(`authnudge-request-v1\n${address}\n${origin}\n${publicKey}`);
-  return b64(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, key, message));
+  // Must match server/lib/request-sign.ts: authnudge-request-v2\n{to}\n{origin}\n{publicKey}\n{issuedAt}
+  const message = new TextEncoder().encode(`authnudge-request-v2\n${address}\n${origin}\n${publicKey}\n${ts}`);
+  return { signature: b64(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, key, message)), issuedAt: ts };
 }
 
 export function envelopeAad(requestId, requesterPublicKey, step) {

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { copyFileSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { copyFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
@@ -22,8 +22,28 @@ export const PACK_FILES = [
   "icons/icon128.png",
 ];
 
+export const PACKED_HOST_PERMISSIONS = ["https://authnudge.com/*"];
+export const PACKED_OPTIONAL_HOST_PERMISSIONS = ["https://*/*"];
+
 export function packageVersion() {
   return JSON.parse(readFileSync(join(root, "manifest.json"), "utf8")).version;
+}
+
+/** CWS upload zip: no localhost required hosts, no optional HTTP-all-urls (CWS rejects both). */
+export function packedManifestText(source = readFileSync(join(root, "manifest.json"), "utf8")) {
+  const manifest = JSON.parse(source);
+  manifest.host_permissions = PACKED_HOST_PERMISSIONS;
+  manifest.optional_host_permissions = PACKED_OPTIONAL_HOST_PERMISSIONS;
+  return `${JSON.stringify(manifest, null, 2)}\n`;
+}
+
+export function assertPackedManifest(text = packedManifestText()) {
+  assert.doesNotMatch(text, /localhost/i);
+  assert.doesNotMatch(text, /127\.0\.0\.1/);
+  assert.doesNotMatch(text, /http:\/\/\*\/\*/);
+  const packed = JSON.parse(text);
+  assert.deepEqual(packed.host_permissions, PACKED_HOST_PERMISSIONS);
+  assert.deepEqual(packed.optional_host_permissions, PACKED_OPTIONAL_HOST_PERMISSIONS);
 }
 
 function pack() {
@@ -40,7 +60,11 @@ function pack() {
   rmSync(zipPath, { force: true });
   mkdirSync(join(staging, "icons"), { recursive: true });
 
-  for (const file of PACK_FILES) copyFileSync(join(root, file), join(staging, file));
+  for (const file of PACK_FILES) {
+    const dest = join(staging, file);
+    if (file === "manifest.json") writeFileSync(dest, packedManifestText());
+    else copyFileSync(join(root, file), dest);
+  }
 
   const zipped = spawnSync("zip", ["-r", "-X", "-q", zipPath, "."], { cwd: staging, stdio: "inherit" });
   if (zipped.status !== 0) process.exit(zipped.status ?? 1);
@@ -55,6 +79,8 @@ if (isMain && process.argv.includes("--check")) {
   assert.ok(!PACK_FILES.includes("pack.mjs"));
   assert.ok(!PACK_FILES.includes("dev.json"));
   assert.match(packageVersion(), /^\d+\.\d+\.\d+$/);
+  assert.throws(() => assertPackedManifest(readFileSync(join(root, "manifest.json"), "utf8")));
+  assertPackedManifest();
   console.log("extension pack check ok");
 } else if (isMain) {
   pack();
