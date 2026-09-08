@@ -67,14 +67,28 @@ assert.equal(plain.origin, origin);
 await assert.rejects(() =>
   decryptEnvelope(keys.privateKey, envelope, { requestId: "other", requesterPublicKey: keys.publicKey }),
 );
+const otpEnvelope = await encryptForRequester(keys.publicKey, { otp: "123456", origin }, requestId, "otp");
+const otpPlain = await decryptEnvelope(keys.privateKey, otpEnvelope, {
+  requestId,
+  requesterPublicKey: keys.publicKey,
+  step: "otp",
+});
+assert.equal(otpPlain.otp, "123456");
+await assert.rejects(() =>
+  decryptEnvelope(keys.privateKey, otpEnvelope, { requestId, requesterPublicKey: keys.publicKey }),
+);
 
 const background = readFileSync(join(here, "background.js"), "utf8");
 assert.match(background, /payload\?\.origin !== origin/);
 assert.match(background, /requestId, requesterPublicKey/);
+assert.match(background, /\/continue/);
+assert.match(background, /detect-otp/);
 assert.doesNotMatch(background, /setBaseUrl|keys\.baseUrl|update_url|useLocal/);
 assert.match(background, /dev\.json/);
 
 const src = fillLoginForm.toString();
+assert.match(src, /detect-otp/);
+assert.match(src, /one-time-code/);
 assert.match(src, /return \{ ok: true \}/);
 assert.match(src, /need_password/);
 assert.match(src, /MutationObserver/);

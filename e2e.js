@@ -60,16 +60,20 @@ export async function signRequest(privateKeyB64, { to, handle, origin, publicKey
   return b64(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, key, message));
 }
 
-export function envelopeAad(requestId, requesterPublicKey) {
-  return new TextEncoder().encode(`authnudge-envelope-v1\n${requestId}\n${requesterPublicKey}`);
+export function envelopeAad(requestId, requesterPublicKey, step) {
+  return new TextEncoder().encode(
+    step
+      ? `authnudge-envelope-v1\n${requestId}\n${requesterPublicKey}\n${step}`
+      : `authnudge-envelope-v1\n${requestId}\n${requesterPublicKey}`,
+  );
 }
 
-export async function encryptForRequester(requesterPublicKey, payload, requestId) {
+export async function encryptForRequester(requesterPublicKey, payload, requestId, step) {
   const requesterPub = await importPublic(requesterPublicKey);
   const ephemeral = await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
   const aesKey = await deriveAesKey(ephemeral.privateKey, requesterPub, "encrypt");
   const iv = crypto.getRandomValues(new Uint8Array(12));
-  const additionalData = envelopeAad(requestId, requesterPublicKey);
+  const additionalData = envelopeAad(requestId, requesterPublicKey, step);
   const ciphertext = await crypto.subtle.encrypt(
     { name: "AES-GCM", iv, additionalData },
     aesKey,
@@ -82,7 +86,7 @@ export async function encryptForRequester(requesterPublicKey, payload, requestId
   };
 }
 
-export async function decryptEnvelope(privateKeyB64, envelope, { requestId, requesterPublicKey }) {
+export async function decryptEnvelope(privateKeyB64, envelope, { requestId, requesterPublicKey, step }) {
   const privateKey = await crypto.subtle.importKey(
     "pkcs8",
     unb64(privateKeyB64),
@@ -92,7 +96,7 @@ export async function decryptEnvelope(privateKeyB64, envelope, { requestId, requ
   );
   const ephemeralPub = await importPublic(envelope.ephemeralPublicKey);
   const aesKey = await deriveAesKey(privateKey, ephemeralPub, "decrypt");
-  const additionalData = envelopeAad(requestId, requesterPublicKey);
+  const additionalData = envelopeAad(requestId, requesterPublicKey, step);
   const plaintext = await crypto.subtle.decrypt(
     { name: "AES-GCM", iv: unb64(envelope.iv), additionalData },
     aesKey,

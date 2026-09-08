@@ -1,10 +1,10 @@
 // Self-contained: chrome.scripting.executeScript serializes this function.
 // Return status only — never field values.
 // ponytail: no shadow-DOM / cross-host iframe recipes; add a site list if real logins stay unfilled.
-export async function fillLoginForm(identifier, secret, expectedOrigin, waitMs = 15000) {
+export async function fillLoginForm(identifier, secret, expectedOrigin, waitMs = 15000, mode = "password") {
   // Playwright page.evaluate only passes one argument.
   if (identifier !== null && typeof identifier === "object" && !Array.isArray(identifier)) {
-    ({ identifier, secret, expectedOrigin, waitMs = 15000 } = identifier);
+    ({ identifier, secret, expectedOrigin, waitMs = 15000, mode = "password" } = identifier);
   }
   const hostOf = (tabUrl) => {
     let url;
@@ -47,6 +47,33 @@ export async function fillLoginForm(identifier, secret, expectedOrigin, waitMs =
 
   const hint = (el) =>
     `${el.autocomplete || ""} ${el.name || ""} ${el.id || ""} ${el.placeholder || ""} ${el.getAttribute("inputmode") || ""}`.toLowerCase();
+
+  const looksLikeOtp = (el) => {
+    const type = (el.type || "text").toLowerCase();
+    const text = hint(el);
+    const max = Number(el.maxLength);
+    if ((el.autocomplete || "").toLowerCase() === "one-time-code") return true;
+    if ((el.getAttribute("inputmode") || "").toLowerCase() === "numeric" && max >= 4 && max <= 8) return true;
+    if (/(^|[^a-z])(otp|totp|2fa|mfa)([^a-z]|$)/.test(text)) return true;
+    if (/(verification code|one[- ]time|security code|login code|auth code)/.test(text)) return true;
+    if (type === "tel" && max >= 4 && max <= 8) return true;
+    return false;
+  };
+
+  const otpFields = () =>
+    [...document.querySelectorAll("input")].filter((el) => {
+      if (!visible(el)) return false;
+      const type = (el.type || "text").toLowerCase();
+      if (["password", "hidden", "submit", "button", "checkbox", "radio", "file", "reset", "image"].includes(type)) {
+        return false;
+      }
+      return looksLikeOtp(el);
+    });
+
+  if (mode === "detect-otp") {
+    if (!sameHost()) return { ok: false, reason: "wrong_origin" };
+    return otpFields().length === 1 ? { ok: true, reason: "otp" } : { ok: false, reason: "no_otp" };
+  }
 
   const scoreIdentifier = (el) => {
     const type = (el.type || "text").toLowerCase();
@@ -116,6 +143,15 @@ export async function fillLoginForm(identifier, secret, expectedOrigin, waitMs =
     }
     return false;
   };
+
+  if (mode === "otp") {
+    if (!sameHost()) return { ok: false, reason: "wrong_origin" };
+    const otpEl = otpFields()[0];
+    if (!otpEl) return { ok: false, reason: "no_otp" };
+    write(otpEl, secret);
+    submitForm(otpEl.form);
+    return { ok: true };
+  }
 
   const submitThenWipe = (form, passwordEl) => {
     const formEl = form || passwordEl.form;

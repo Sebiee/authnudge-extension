@@ -146,12 +146,12 @@ function waitForFillRetry(tabId, deadline) {
   });
 }
 
-async function runFillOnce(tabId, origin, identifier, secret, waitMs) {
+async function runFillOnce(tabId, origin, identifier, secret, waitMs, mode = "password") {
   const inject = (allFrames) =>
     chrome.scripting.executeScript({
       target: { tabId, allFrames },
       func: fillLoginForm,
-      args: [identifier, secret, origin, waitMs],
+      args: [identifier, secret, origin, waitMs, mode],
     });
   try {
     return foldFillResults(await inject(true));
@@ -188,10 +188,10 @@ async function injectFill(tabId, origin, identifier, secret) {
   return { status: "no_form" };
 }
 
-async function useEnvelope(tabId, origin, envelope, privateKey, requestId, requesterPublicKey) {
+async function useEnvelope(tabId, origin, envelope, privateKey, requestId, requesterPublicKey, step) {
   let payload;
   try {
-    payload = await decryptEnvelope(privateKey, envelope, { requestId, requesterPublicKey });
+    payload = await decryptEnvelope(privateKey, envelope, { requestId, requesterPublicKey, step });
   } catch {
     return { status: "error", code: "generic" };
   } finally {
@@ -201,6 +201,17 @@ async function useEnvelope(tabId, origin, envelope, privateKey, requestId, reque
   if (payload?.origin !== origin) {
     payload = null;
     return { status: "error", code: "generic" };
+  }
+
+  if (step === "otp") {
+    const code = payload?.otp;
+    payload = null;
+    if (typeof code !== "string" || !code.trim()) return { status: "error", code: "generic" };
+    pushStatus("filling");
+    const result = await runFillOnce(tabId, origin, "", code.trim(), 0, "otp");
+    if (result.ok) return { status: "filled" };
+    if (result.reason === "wrong_origin") return { status: "page_changed" };
+    return { status: "no_form" };
   }
 
   const identifier = payload?.username;
@@ -214,6 +225,44 @@ async function useEnvelope(tabId, origin, envelope, privateKey, requestId, reque
   return injectFill(tabId, origin, identifier, secret);
 }
 
+async function detectOtp(tabId, origin) {
+  const result = await runFillOnce(tabId, origin, "", "", 0, "detect-otp");
+  return result.ok;
+}
+
+async function askOtp(meta) {
+  try {
+    const res = await fetch(`${meta.baseUrl}/api/v1/requests/${meta.requestId}/continue`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${meta.claimToken}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ type: "otp" }),
+    });
+    return res.ok || res.status === 409;
+  } catch {
+    return false;
+  }
+}
+
+async function watchForOtp(meta, waitClear = false) {
+  const deadline = Date.now() + 110_000;
+  let wait = waitClear;
+  while (meta.gen !== settledGen && Date.now() < deadline) {
+    const tab = await getTab(meta.tabId);
+    if (!tab?.url || !sameLoginHost(tab.url, meta.origin)) return;
+    const found = await detectOtp(meta.tabId, meta.origin);
+    if (wait) {
+      if (!found) wait = false;
+    } else if (found) {
+      await askOtp(meta);
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+  }
+}
+
 async function finishExpired(meta) {
   if (meta.gen === settledGen) return;
   settledGen = meta.gen;
@@ -224,33 +273,70 @@ async function finishExpired(meta) {
   pushStatus("expired");
 }
 
-async function finishEnvelope(meta, envelope) {
-  if (!envelope || meta.gen === settledGen) return;
+async function finishFilled(meta) {
+  if (meta.gen === settledGen) return;
   settledGen = meta.gen;
   stopSocket();
   await chrome.alarms.clear(ALARM);
   await dropClaim();
+  live = { tabId: meta.tabId, origin: meta.origin, expiresAt: meta.expiresAt, status: "filled" };
+  pushStatus("filled");
+}
 
-  const keys = await ensureKeys();
-  const result = await useEnvelope(meta.tabId, meta.origin, envelope, keys.privateKey, meta.requestId, keys.publicKey);
+async function finishWith(meta, result) {
+  if (meta.gen === settledGen) return;
+  settledGen = meta.gen;
+  stopSocket();
+  await chrome.alarms.clear(ALARM);
+  await dropClaim();
   live = { tabId: meta.tabId, origin: meta.origin, expiresAt: meta.expiresAt, status: result.status };
   pushStatus(result.status, result.code ? { code: result.code } : {});
 }
 
+async function handleEnvelope(meta, envelope, kind) {
+  if (!envelope || meta.gen === settledGen) return;
+  const seen = `${kind}:${envelope.ciphertext?.slice(0, 24) || ""}`;
+  if (meta.lastEnvelope === seen) return;
+  meta.lastEnvelope = seen;
+  const keys = await ensureKeys();
+  const step = kind === "otp" ? "otp" : undefined;
+  const result = await useEnvelope(
+    meta.tabId,
+    meta.origin,
+    envelope,
+    keys.privateKey,
+    meta.requestId,
+    keys.publicKey,
+    step,
+  );
+  if (kind === "otp") {
+    if (result.status !== "filled") return finishWith(meta, result);
+    pushStatus("filling");
+    void watchForOtp(meta, true);
+    return;
+  }
+  if (result.status !== "filled") return finishWith(meta, result);
+  meta.gotPassword = true;
+  await saveClaim(meta);
+  pushStatus("filling");
+  void watchForOtp(meta);
+}
+
 async function pollOnce(meta) {
   if (meta.gen === settledGen) return true;
-  if (Date.now() >= meta.expiresAt) {
-    await finishExpired(meta);
-    return true;
-  }
   try {
     const res = await fetch(`${meta.baseUrl}/api/v1/requests/${meta.requestId}`, {
       headers: { authorization: `Bearer ${meta.claimToken}` },
     });
     if (!res.ok) return false;
     const data = await res.json();
+    if (data.expiresAt) meta.expiresAt = Date.parse(data.expiresAt) || meta.expiresAt;
+    if (data.status === "holding" && data.envelope) {
+      await handleEnvelope(meta, data.envelope, data.envelopeKind);
+      return false;
+    }
     if (data.status === "fulfilled") {
-      await finishEnvelope(meta, data.envelope ?? null);
+      await finishFilled(meta);
       return true;
     }
     if (data.status === "expired") {
@@ -280,7 +366,8 @@ function connectSocket(meta) {
     } catch {
       return;
     }
-    if (msg.type === "fulfilled") void finishEnvelope(meta, msg.envelope ?? null);
+    if (msg.type === "holding" && msg.envelope) void handleEnvelope(meta, msg.envelope, msg.envelopeKind);
+    if (msg.type === "fulfilled") void finishFilled(meta);
     if (msg.type === "expired") void finishExpired(meta);
   });
   socket.addEventListener("close", () => {
@@ -300,7 +387,10 @@ async function resumeWatch() {
   const meta = claim ?? (await loadClaim());
   if (!meta) return;
   if (Date.now() >= meta.expiresAt) {
-    await finishExpired({ ...meta, gen: meta.gen || ++requestGen });
+    if (!meta.gen) meta.gen = ++requestGen;
+    const done = await pollOnce(meta);
+    if (!done && meta.gotPassword) await finishFilled(meta);
+    else if (!done) await finishExpired({ ...meta, gen: meta.gen });
     return;
   }
   if (meta.gen === settledGen) return;
@@ -316,7 +406,9 @@ async function tickWatch() {
     return;
   }
   if (Date.now() >= meta.expiresAt) {
-    await finishExpired(meta);
+    const done = await pollOnce(meta);
+    if (!done && meta.gotPassword) await finishFilled(meta);
+    else if (!done) await finishExpired(meta);
     return;
   }
   if (socket?.readyState === WebSocket.OPEN) socket.send("ping");
@@ -357,7 +449,7 @@ async function startRequest({ to, tabId }) {
       });
       created = await res.json().catch(() => ({}));
       if (res.status === 401) return { status: "error", code: "pairing" };
-      if (res.status === 429) return { status: "error", code: "generic", message: "Inbox is full. Try again shortly." };
+      if (res.status === 429) return { status: "error", code: "generic", message: "Too many requests. Try again shortly." };
       if (res.status !== 201) return { status: "error", code: "generic" };
     } catch {
       return { status: "error", code: "generic", message: "Could not reach Authnudge." };
